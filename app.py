@@ -4,11 +4,17 @@ import ccxt
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # ─── Auto‑refresh every 5 minutes (300 000 ms) ─────────────────────────────
 st_autorefresh(interval=5 * 60 * 1000, limit=None)
 
-# ─── Sidebar ────────────────────────────────────────────────────────────────
+# Display when the page last loaded (Pacific Time)
+now = datetime.now(tz=ZoneInfo("America/Los_Angeles"))
+st.markdown(f"**Last page load:** {now:%Y-%m-%d %H:%M:%S} PDT")
+
+# ─── Sidebar Settings ───────────────────────────────────────────────────────
 st.sidebar.header("Settings")
 symbol         = st.sidebar.selectbox("Asset", ["BTC/USD", "ETH/USD"])
 interval       = st.sidebar.selectbox("Interval", ["1d", "4h", "1h", "15m", "1w"])
@@ -23,6 +29,7 @@ limit          = st.sidebar.number_input("History Limit (candles)", 500, 5000, 2
 def get_exchange():
     return ccxt.kraken()
 
+# ─── Data Loader ────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_data(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     ex   = get_exchange()
@@ -30,7 +37,6 @@ def load_data(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     df   = pd.DataFrame(bars, columns=['timestamp','open','high','low','close','volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    # convert to Pacific Time
     df.index = df.index.tz_localize('UTC').tz_convert('America/Los_Angeles')
     return df
 
@@ -41,12 +47,18 @@ macd              = MACD(df['close'], window_slow=26, window_fast=12, window_sig
 df['macd']        = macd.macd()
 df['macd_signal'] = macd.macd_signal()
 
-# ─── Raw Daily Signals ──────────────────────────────────────────────────────
+# ─── Compute Raw Daily Signals ──────────────────────────────────────────────
 df['daily_sig'] = ''
-df.loc[(df['rsi'] < buy_rsi_daily)  & (df['macd'] > df['macd_signal']), 'daily_sig'] = 'BUY'
-df.loc[(df['rsi'] > sell_rsi_daily) & (df['macd'] < df['macd_signal']), 'daily_sig'] = 'SELL'
+df.loc[
+    (df['rsi'] < buy_rsi_daily) & (df['macd'] > df['macd_signal']),
+    'daily_sig'
+] = 'BUY'
+df.loc[
+    (df['rsi'] > sell_rsi_daily) & (df['macd'] < df['macd_signal']),
+    'daily_sig'
+] = 'SELL'
 
-# ─── Weekly Signals ────────────────────────────────────────────────────────
+# ─── Compute Weekly Signals ────────────────────────────────────────────────
 weekly = df.resample('W').agg({
     'open':'first','high':'max','low':'min','close':'last','volume':'sum'
 })
@@ -68,18 +80,18 @@ df['weekly_sig'] = weekly['signal'].reindex(df.index, method='ffill').fillna('')
 # ─── Hybrid Trade Signal ───────────────────────────────────────────────────
 trade_signal = []
 for ts, row in df.iterrows():
-    if row['daily_sig']=='BUY' and row['weekly_sig']!='SELL':
+    if row['daily_sig'] == 'BUY' and row['weekly_sig'] != 'SELL':
         trade_signal.append('BUY')
-    elif row['weekly_sig']=='SELL':
+    elif row['weekly_sig'] == 'SELL':
         trade_signal.append('SELL')
     else:
         trade_signal.append('')
 df['trade_signal'] = trade_signal
 
-# ─── Display ────────────────────────────────────────────────────────────────
+# ─── Display the Dashboard ──────────────────────────────────────────────────
 st.title(f"🔹 {symbol} Hybrid Strategy Dashboard")
 
-# Daily Overview
+# 1) Daily Overview
 st.subheader("🗓️ Daily Overview")
 sel = st.date_input(
     "Pick a date",
@@ -96,23 +108,23 @@ if isinstance(daily, pd.Series):
     daily = daily.to_frame().T
 st.table(daily)
 
-# Price Chart
+# 2) Price Chart with Signals
 st.subheader("📈 Price Chart with Signals")
 chart_df = pd.DataFrame({
     'Close': df['close'],
-    'Buy'  : df['close'].where(df['trade_signal']=='BUY'),
-    'Sell' : df['close'].where(df['trade_signal']=='SELL'),
+    'Buy':   df['close'].where(df['trade_signal']=='BUY'),
+    'Sell':  df['close'].where(df['trade_signal']=='SELL'),
 })
 st.line_chart(chart_df, y=['Close','Buy','Sell'], use_container_width=True)
 
-# Latest Signals
+# 3) Latest Signals
 st.subheader("📰 Latest Signals")
 st.dataframe(df[[
     'close','rsi','macd','macd_signal',
     'daily_sig','weekly_sig','trade_signal'
 ]].tail(20), use_container_width=True)
 
-# Full Daily Data Table
+# 4) Full Daily Data Table
 st.subheader("📊 Daily Data Table")
 st.dataframe(df[[
     'open','high','low','close','volume',
@@ -120,7 +132,7 @@ st.dataframe(df[[
     'daily_sig','weekly_sig','trade_signal'
 ]], use_container_width=True)
 
-# Download CSV
+# 5) Download CSV
 csv = df.to_csv().encode()
 st.download_button(
     "💾 Download CSV",
